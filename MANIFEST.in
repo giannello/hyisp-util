@@ -1,0 +1,14 @@
+include COPYING
+include README.md
+
+# The protocol write-up is deliberately NOT shipped: it stays in the repository
+# but is not redistributed with the package.
+exclude FIRMWARE_UPDATE_PROTOCOL.md
+
+# Firmware images, vendor tooling and private notes are not redistributed.
+exclude *.bin
+prune internal
+prune .venv
+
+global-exclude *.py[cod]
+global-exclude .DS_Store

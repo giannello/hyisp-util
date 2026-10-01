@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hyisp-util"
+version = "0.1.0"
+description = "Firmware flasher for the Heng Yu (HYISP) USB HID bootloader, as used by the Metadot Das Keyboard 4 (Professional, Ultimate, Professional for Mac)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "GPL-3.0-only"
+authors = [
+  {name = "Giuseppe Iannello"}
+]
+keywords = ["hyisp", "heng-yu", "das-keyboard-4", "dk4", "keyboard", "firmware", "flasher", "hid"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Utilities",
+]
+
+dependencies = [
+  "hidapi>=0.14.0",
+]
+
+[project.scripts]
+hyisp-util = "hyisp:main"
+
+[project.urls]
+Homepage = "https://github.com/giannello/hyisp-util"
+Issues = "https://github.com/giannello/hyisp-util/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+exclude = ["tests*", "build*", "dist*", "deobfuscated*", ".venv*", ".git*", "internal*", "DK-flasher-reveng*"]
+
+[tool.setuptools]
+py-modules = ["hyisp"]

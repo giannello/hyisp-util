@@ -1,0 +1,107 @@
+name: Publish to PyPI
+
+# Publish on tag push only. The tag must be the version, with or without a `v`
+# prefix: `1.2.3` or `v1.2.3`. The version is read from pyproject.toml and
+# checked against the tag, so a mistagged release fails instead of uploading a
+# version that does not match its tag.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+*"
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # IMPORTANT: this permission is mandatory for Trusted Publishing
+      id-token: write
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Trusted publishing via OIDC. There is no API token in this repo and no
+      # long-lived secret to leak or rotate; PyPI issues a short-lived token for
+      # this job only.
+      - name: Verify tag matches pyproject version
+        id: check
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          declared=$(python -c "
+          import tomllib, pathlib
+          with open('pyproject.toml','rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")
+          tag="${TAG#v}"
+          if [ "$declared" != "$tag" ]; then
+            echo "::error::Tag '$TAG' does not match pyproject.toml version '$declared'"
+            exit 1
+          fi
+          echo "Tag $TAG matches pyproject version $declared"
+          echo "version=$declared" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade build twine
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distributions
+        run: twine check --strict dist/*
+
+      # Fail before publishing if anything that must not ship got into the
+      # artifacts: firmware images, vendor tooling, or the protocol write-up.
+      #
+      # Member names are extracted with zipfile/tarfile rather than parsed out
+      # of `zipfile -l` or `tar tzf` output: those listings append size and date
+      # columns, so an end-anchored pattern like '\.bin$' silently never matches
+      # a wheel. Matching against bare names avoids that whole class of bug.
+      - name: Check distribution contents
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, sys, tarfile, zipfile
+
+          forbidden = (
+              "FIRMWARE_UPDATE_PROTOCOL",
+              "USB_FD2",
+              ".app/",
+              "internal/",
+          )
+
+          def members(path):
+              if path.endswith(".whl"):
+                  with zipfile.ZipFile(path) as z:
+                      return z.namelist()
+              with tarfile.open(path) as t:
+                  return t.getnames()
+
+          bad = False
+          for path in sorted(glob.glob("dist/*")):
+              if not path.endswith((".whl", ".tar.gz")):
+                  continue
+              for name in members(path):
+                  base = name.rsplit("/", 1)[-1]
+                  if name.endswith(".bin") or any(f in name for f in forbidden):
+                      print(f"::error::{path} must not contain {name}")
+                      bad = True
+              if not bad:
+                  print(f"OK: {path}")
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

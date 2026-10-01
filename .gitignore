@@ -1,0 +1,20 @@
+# Python / build artifacts
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Private working notes -- internal reference only, never published.
+internal/
+
+# Firmware files -- vendor's own, not ours to redistribute.
+*.bin
