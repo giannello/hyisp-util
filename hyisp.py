@@ -101,7 +101,7 @@ CMD_ENTER_LDROM_ISP = 0xAA
 CMD_RESET = 0xAF
 CMD_APP_VERSION = 0xB0
 
-# Read-only register getters (§10.4).  0xFB emits read32(0x00300000) and
+# Read-only register getters (§4.2, §4.5).  0xFB emits read32(0x00300000) and
 # read32(0x00300004) MSB-first; 0xB8 returns read32(0x50000000) (GCR, PDID)
 # byte-pair-swapped; 0xB9 returns the RAM flash-base global big-endian.
 CMD_USER_CONFIG = 0xFB
@@ -920,7 +920,8 @@ def enter_isp(
     progress.step(f"device reports target {kb} KB, model 0x{model:04X}")
 
     # The guard the vendor tools apply: the file must be exactly the advertised
-    # size.  This is a per-mode target size, NOT a capacity check (§6.4).
+    # size.  This is a per-mode target size, NOT a capacity check (§6 step 4,
+    # §6.5).
     if fw.size != kb * 1024:
         raise FlashError(
             f"Firmware file size is not correct.\n"
@@ -2132,7 +2133,9 @@ def decode_config0(word: int) -> list[str]:
     cbost = (word >> 20) & 1
     out.append(f"CBORST={cbost} (BOD reset {'disabled' if cbost else 'enabled'})")
     out.append(f"CBS={cbs:02b} (boot {'APROM' if cbs & 0x2 else 'LDROM'})")
-    out.append(f"DFVSEN={(word >> 2) & 1} (fixed 4 KB data flash)")
+    dfvsen = (word >> 2) & 1
+    out.append(f"DFVSEN={dfvsen} "
+               f"({'fixed 4 KB data flash' if dfvsen else 'variable size via DFBADR'})")
     out.append(f"LOCK={lock} ({'unlocked' if lock else 'locked (ICP/debug readout blocked)'})")
     return out
 
@@ -2160,6 +2163,9 @@ def cmd_regs(args) -> int:
             raise FlashError(
                 f"0xFB user-config read failed (status 0x{status:02X}, "
                 f"payload {payload.hex(' ')})"
+                + (" — the bootloader does not implement 0xFB; "
+                   "run regs against a unit in application mode"
+                   if in_isp else "")
             )
         # MSB-first emission: the payload already is CONFIG0 then CONFIG1 in
         # big-endian byte order.

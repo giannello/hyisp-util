@@ -160,8 +160,9 @@ failed) and `0x18` (checksum mismatch).
 A response payload is present only for the echoed commands `0xA0`, `0xA5`, `0xA6`,
 `0xAA`, `0xB0`, `0xB1` and `0xD0`.
 
-> `0xB1` and `0xD0` are accepted but never sent by either updater. They are
-> presumably legacy or vendor-reserved commands.
+> `0xB1` and `0xD0` are accepted but never sent by either updater. `0xB1` is
+> answered by the application with its model id; `0xD0` is implemented by
+> neither stage and answers `0xF1` (§4.1).
 
 ### 3.1 Measured behaviour of `0xAA` and `0xA5` on real hardware
 
@@ -229,10 +230,10 @@ the device — it has to come from the image file.
 **The running application applies the same rule to its own pool.** Measured from
 application mode on a single unit — the route §6.5 authenticates through — the
 application accepts the §5.0-transformed bytes of its own identifier pool
-(`HYISP` → `8B 9B 7B 6A CA FA`) and the plaintext bytes `GF`; it rejects the
+(`GFHYISP` → `8B 9B 7B 6A 6B CA FA`) and the plaintext bytes `GF`; it rejects the
 bootloader's 10-byte trailer with `0x18`. Each stage therefore accepts the
 inverted encoding only of *its own* pool string: the bootloader wants the
-firmware trailer raw, the application wants `GF` (or the inverted `HYISP`). A
+firmware trailer raw, the application wants `GF` (or the inverted `GFHYISP`). A
 payload that authenticates one stage is refused by the other with `0x18`, and
 the comparison is against the pool the *running* stage stores — which is why the
 vendor trailer works from ISP mode and fails from application mode, and vice
@@ -242,26 +243,212 @@ versa.
 
 ## 4. Command table
 
+The keyboard runs **two different firmwares**, and the same opcode means
+different things in each of them:
+
+- the **ISP bootloader** (LDROM, 4 KB, `B2175V13`), which runs in ISP mode and
+  can only write the **application** region;
+- the **application** (APROM, 32 KB, `S1947V33` / `S2175V16`), which runs in
+  normal operation and can only write the **bootloader** region.
+
+That last point is structural, not incidental: whichever stage is executing
+addresses the *other* stage's window (`0x00000 +` from the bootloader,
+`0x100000 +` from the application), so **neither stage can rewrite itself**.
+An application update is written by the bootloader; a bootloader update is
+written by the application (§6.5).
+
+### 4.1 ISP-mode commands (the bootloader)
+
 | Opcode | Name | Payload | Notes |
 |---|---|---|---|
-| `0x00` | enter testing mode | `00 1F 18` | checksum does not validate; see below |
 | `0xA0` | enter ISP | — | 3-byte response: flash KB + model id |
-| `0xA1` | write flash | `addrHi addrLo data…` | 16-bit big-endian address |
-| `0xA4` | erase chip | — | fails with `0x18` if `0xA5` was rejected |
-| `0xA5` | check profile | 10 bytes, **raw** | must be ≥ 8 bytes (ISP mode); the application path authenticates differently — see §3.1 |
+| `0xA1` | write flash | `addrHi addrLo data…` | 16-bit big-endian address, into the **application** window |
+| `0xA4` | erase chip | — | erases the **application** window; fails with `0x18` if `0xA5` was rejected |
+| `0xA5` | check profile | 10 bytes, **raw** | must be ≥ 8 bytes; the bootloader compares the raw bytes against its own pool (the firmware trailer) — the `GF` magic and the model id, both still obfuscated (§5.0) |
 | `0xA6` | get version (ISP) | — | returns the bootloader version |
 | `0xA7` | read flash | `addrHi addrLo count` | 16-bit big-endian address + byte count; read-only; see §6.6 |
-| `0xA8` | protect chip | — | |
-| `0xAA` | latch bootloader write | — | commit step of the application-side write path (§6.5); bare it latches the device (recover with `0xAF`) |
-| `0xAF` | reset keyboard | — | also clears an `0xAA` latch |
+| `0xA8` | protect chip | — | locks the flash against debug-interface readout by clearing the CONFIG0 LOCK bit — the same CONFIG0 bit the application clears (§4.3) |
+| `0xAA` | latch bootloader write | — | rejected outright with `0xF1` — the dispatcher's range covers `0xA0`–`0xAF`, but this opcode has no handler |
+| `0xAF` | reset keyboard | — | |
 
 `0xA0` returns 3 bytes: byte 0 is the **expected flash size in KB**, bytes 1–2 are
 a model identifier. Both updaters verify `fileSize == responseByte0 << 10`, i.e.
 the file must be exactly `N × 1024` bytes for the device's `N` KB flash.
 
-> **Note on `0x00`:** the literal frame is `EA 03 00 1F 18`, but
-> `XOR(EA,03,00,1F) = 0xF6 ≠ 0x18`. This command does not follow the standard
-> checksum convention and is the only command that does not validate.
+Opcodes the bootloader does not implement answer `0xF1` ("unknown command"). The
+bootloader's dispatcher covers exactly `0xA0`–`0xAF`, so the in-range opcodes
+without a handler — `0xA2`, `0xA3`, `0xA9`, `0xAB`–`0xAE` — and every opcode
+outside that range (`0xB0`, `0xB1`, `0xD0`, `0xAA`, `0xFB`, …) all answer
+`0xF1`.
+
+### 4.2 Application-mode commands
+
+The application implements the same `0xA0`–`0xAF` opcodes as the bootloader,
+plus a set of read-only getters and a few mode switches that exist only here.
+
+| Opcode | Name | Payload | Notes |
+|---|---|---|---|
+| `0xA0` | enter ISP | — | sets the boot-select bit and issues a system reset → the device re-enumerates as ISP; a latched device answers `04 01 <PID>` and does not reset (§3.1) |
+| `0xA1` | write flash | `addrHi addrLo data…` | auth-gated; writes into the **bootloader** window — flash address `0x100000 + offset`, not a CPU address |
+| `0xA4` | erase chip | — | auth-gated; erases the 4 KB bootloader window |
+| `0xA5` / `0xB4` | authenticate | `GF` (plaintext) or the §5.0 encoding of the application's own pool (`GFHYISP` → `8B 9B 7B 6A 6B CA FA`) | sets the auth flag; `0xB4` is an alias of `0xA5` (same handler); the pool is the application's, not the firmware trailer (§3.1) |
+| `0xA6` / `0xB0` | get version | — | the **application** version (`S1947V33` / `S2175V16`) |
+| `0xA8` | protect chip | — | clears the LOCK bit in CONFIG0, i.e. locks the flash; a no-op on an already-locked unit |
+| `0xAA` | latch bootloader write | — | sets a RAM latch — it does **not** enter ISP, and it breaks `0xA0` until an `0xAF` clears it (§3.1) |
+| `0xAF` / `0xFF` | reset keyboard | — | CPU reset; when latched, verifies the new bootloader first (§6.5); `0xFF` is an alias of `0xAF` (same handler) |
+| `0xB1` | model id | — | replies `D4215` |
+| `0xB2` | sentinel | — | replies the single byte `0xC7` |
+| `0xB7` | vector table | — | 12 bytes: the APROM reset vector and stack pointer |
+| `0xB8` | GCR PDID | — | 4 bytes, byte-pair swapped (`00 01 23 15` = PDID `0x00012315`) |
+| `0xB9` | flash base | — | 4 bytes, big-endian (`0x00008000`) |
+| `0xF1` | byte program | `addrHi addrLo data…` | raw, into the **settings** region at `0x8000 +` |
+| `0xF2` | byte read | `addrHi addrLo count` | from the settings region at `0x8000 +` |
+| `0xF4` | product id | — | replies `40 01` = PID `0x0140`, little-endian |
+| `0xF8` | seal settings | — | writes a checksum over the 4 KB settings region |
+| `0xFB` | user config | — | 8 bytes: CONFIG0 then CONFIG1, each MSB-first (§4.5) |
+| `0x68` | host command gate | — | arms the host key-injection path |
+| `0x6F` / `0xF0` | mode on / off | — | USB descriptor switch |
+| `0x28` | (inline) | — | acknowledged, no payload |
+
+Opcodes the application does not implement answer `0xF1` — `0xA7` (read flash)
+and `0xD0` among them. The full set the application answers is `0x28`, `0x68`,
+`0x6F`, `0xA0`, `0xA1`, `0xA4`–`0xA6`, `0xA8`, `0xAA`, `0xAF`, `0xB0`–`0xB2`,
+`0xB4`, `0xB7`–`0xB9`, `0xF0`–`0xF2`, `0xF4`, `0xF8`, `0xFB` and `0xFF`;
+everything else — `0xA2`, `0xA3`, `0xA7`, `0xA9`, `0xAB`–`0xAE`, `0xD0` and
+`0x00` — falls through to the default handler and answers `0xF1`.
+
+`0xFB` is **application-only**: the bootloader implements no register getters
+at all, and answers `0xF1`.
+
+> **Consequence for implementers:** the "enter ISP" command is not a mode
+> switch you can inspect the result of — it is a *reset request*. `0xA0` from
+> the application sets a one-shot boot-select bit and resets the chip, and the
+> bootloader takes over. The reply is the same 3 bytes the bootloader sends
+> (`20 00 00`), so the reply tells you nothing about what the reset did — and on
+> a latched device it tells you nothing at all, because there is no reset
+> either (§3.1).
+
+### 4.3 The same opcode in both stages
+
+| Opcode | In ISP mode | In application mode |
+|---|---|---|
+| `0xA0` | replies `20 00 00` (32 KB target, model `0x0000`) | replies `20 00 00` and resets into the bootloader; a latched device answers `04 01 <PID>` and does not reset |
+| `0xA1` | writes the **application** window, unauthenticated | writes the **bootloader** window, auth-gated by `0xA5` |
+| `0xA4` | erases the **application** window | erases the **bootloader** window, and sets the CBS boot-origin bit first |
+| `0xA5` | compares the raw firmware trailer (its own pool) | compares plaintext `GF` or the transform of its own pool (`GFHYISP` → `8B 9B 7B 6A 6B CA FA`) |
+| `0xA6` | bootloader version `B2175V13` | application version `S1947V33` / `S2175V16` |
+| `0xA7` | reads flash | `0xF1` — not implemented |
+| `0xA8` | clears the LOCK bit in CONFIG0, i.e. locks the flash | clears the LOCK bit in CONFIG0 — the same operation |
+| `0xAA` | `0xF1` — rejected outright | sets the RAM latch; replies `04 01 <PID>`; does not enter ISP (§3.1) |
+| `0xAF` | resets the keyboard | CPU reset; verifies the new bootloader first if latched |
+
+`0xB0`/`0xB1`/`0xD0` invert the pattern: `0xB0` and `0xB1` are application-only
+(`0xF1` in ISP mode), and `0xD0` is implemented by neither.
+
+### 4.4 Note on `0x00` — the "enter testing mode" command
+
+The vendor's Windows tool sends a 5-byte frame `EA 03 00 1F 18` for a lone
+`0x00` op code, mnemonic "enter testing mode". It has **no effect** on either
+image, for two independent reasons:
+
+1. **It fails the device's XOR check.** The checksum is the XOR of bytes `0 … len`
+   (§3), so this frame should carry `XOR(EA,03,00,1F) = 0xF6`, not `0x18`. The
+   frame is rejected before dispatch and the device answers **`0xFC`** (bad
+   checksum).
+2. **Even with a valid checksum, `0x00` is not implemented.** The application's
+   dispatcher has no case for it (its lowest implemented op code is `0x28`), and
+   the bootloader's dispatcher only routes `0xA0`–`0xAF`, so `0x00` falls
+   through to the default handler in both → status **`0xF1`** (unknown command).
+
+The mnemonic survives only in the vendor's host tool.
+
+### 4.5 The register words: CONFIG0, CONFIG1 and the boot chain
+
+The application exposes the chip's user-configuration words through `0xFB`,
+which returns two 32-bit words, each emitted **MSB-first**, so the payload can
+be read as big-endian directly (no byte-pair swap — unlike `0xB8`):
+
+```
+CONFIG0 (0x00300000)  4 bytes, MSB-first
+CONFIG1 (0x00300004)  4 bytes, MSB-first
+```
+
+`hyisp-util regs` reads and decodes them. The bits that matter to an
+implementer:
+
+| Bit | Name | Meaning |
+|---|---|---|
+| 31 | CWDTEN | 0 = window watchdog enabled at power-on |
+| 26:24 | CFOSC | CPU clock after reset (`111` = internal RC) |
+| 23:20 | CBODEN / CBOV / CBORST | brown-out detector enable, voltage, reset enable |
+| **7:6** | **CBS[1:0]** | **CBS[1]** (bit 7) = boot origin, **CBS[0]** (bit 6) = memory map (IAP) — see below |
+| 2 | DFVSEN | 1 = fixed 4 KB data flash; 0 = variable size via DFBADR |
+| **1** | **LOCK** | 0 = flash locked (external debug reads return `0xFFFFFFFF`); 1 = unlocked |
+| 0 | DFEN | data-flash enable |
+
+**CONFIG1** holds `DFBADR[19:0]`, the data-flash base address. On a DK4 it
+reads `0x00008000` — the same value as the settings window that `0xF1`/`0xF2`
+address.
+
+A DK4 in normal operation reads:
+
+```
+CONFIG0 = 0xFFFFFF78   →  CBS = 01, LOCK = 0 (locked), DFVSEN = 0, CWDTEN = 1
+CONFIG1 = 0x00008000   →  DFBADR = 0x8000
+```
+
+**LOCK = 0 (locked)** is the normal shipping state: `0xA8` only ever *clears*
+the bit, so on an already-locked unit it changes nothing, and a live read of
+`0xFB` before and after it is byte-identical. The lock blocks **external
+debug-interface reads** (ICP/SWD readout, an anti-teardown measure); ISP reads
+and flash execution are unaffected.
+
+**CBS[1:0] selects the boot origin and the memory map.** CBS[1] (bit 7) picks
+the boot origin; CBS[0] (bit 6) picks the post-boot memory map. The TRM's four
+combinations:
+
+| CBS[1:0] | Boot origin | Executing range / map |
+|---|---|---|
+| `11` | APROM | APROM only; the LDROM is not memory-readable — the production state |
+| `01` | LDROM | LDROM only; the APROM is not memory-readable |
+| `10` | APROM | APROM + LDROM mapped at `0x100000`–`0x10FFF` (IAP; the vector page is remappable) |
+| `00` | LDROM | LDROM + most of the APROM (the first 512 B come from the LDROM at `0x0`; IAP) |
+
+A DK4 reads `01`: the boot origin is the LDROM, so the bootloader runs first and
+chains to the application. The *map* cell of the `01` row does not describe what
+this firmware does, though — the application executes from the APROM at
+`0x000000` (it serves the APROM reset vector through `0xB7`) and reaches the
+bootloader window at flash `0x100000` (the `HYISP` signature at `0x100FF4`).
+Treat the map column as indicative and the boot-origin column as
+authoritative.
+
+**CBS[1]** (bit 7) is toggled by the update commands themselves: the
+application sets it (`0xA4`) for the duration of a bootloader write, and a
+latched `0xAF` clears it again afterwards. So `CBS[1] = 0` does not mean "the
+bootloader boots and stays there" but "the next power-on enters the bootloader,
+which validates the application and chains to it" — which is why a unit
+reading `CBS = 01` is a perfectly healthy keyboard running its application.
+
+**The boot chain, concretely.** The silicon has a second, volatile boot-select
+bit (`ISPCON.BS`) that is re-loaded as `~CBS[1]` after a power-on — and after
+any reset other than a CPU or system reset; a CPU or system reset preserves
+it:
+
+- `0xA0` sets `ISPCON.BS = 1` and issues a system reset → the next boot starts
+  in the bootloader, and the bootloader stays there.
+- A latched `0xAF` issues a **CPU** reset, which preserves `ISPCON.BS = 0` → the
+  next boot starts directly in the application.
+- A **power-on** re-loads `ISPCON.BS = ~CBS[1]`, so with `CBS = 01` the
+  bootloader runs first, validates the application (the same signature and
+  checksum check `0xAF` performs) and chains to it.
+
+So the bootloader is on the power-on path of every updated unit, and it
+enumerates over USB only if it decides to stay. **Holding `Esc` + `1` + `A`
+while plugging the keyboard in forces it to stay in ISP mode**; this is a
+boot-time key check in the bootloader, not a RAM mailbox, and it is the only
+way to reach the bootloader by hand. (A software reset — the application
+clearing the reset-cause flags before its `0xA0` — skips the key check
+entirely, which is why the command works without any keys held.)
 
 ---
 
@@ -520,7 +707,7 @@ hardware-confirmed one is marked.
     > flash byte-identical to the deobfuscated file, so the §5.4 checksum still
     > balances. The test runs on the **obfuscated** bytes.
 11. **Write pass 2** (Windows): seek to `0`, send **`0xA1`** for the first `0x20`
-    chunks. → **The vector table is written last** (§8.4), so a failure mid-update
+    chunks. → **The vector table is written last** (§7.4), so a failure mid-update
     cannot leave the device unbootable. After 3 failures:
     `"Retried %d times, Update fail at 0x%02X%02X"`.
     The macOS updater instead does a single linear pass, skipping empty 16-byte
@@ -718,7 +905,7 @@ Notes:
 - The new bootloader is entered afterwards with the ordinary `0xA0`; like every
   image it enumerates with its own PID (§1), so discovery needs no changes.
 - The vendor updaters never reach this route. They gate on the size byte of
-  `0xA0`'s response (`fileSize == responseByte0 << 10`, §4), which reports 32
+  `0xA0`'s response (`fileSize == responseByte0 << 10`, §4.1), which reports 32
   for the application window, so a 4 KB file fails their guard before any of
   the above runs; and where they do select `0xAA` for a 4 KB image, they send
   it bare, where it only latches.
@@ -862,11 +1049,15 @@ rest of the image is safely in flash.
 ## 8. Open questions
 
 1. **Opcodes `0xB1` and `0xD0`** — *resolved.* In ISP mode both answer `0xF1`,
-   the same status as every opcode the bootloader does not implement (§4). In
+   the same status as every opcode the bootloader does not implement (§4.1). In
    application mode `0xD0` also answers `0xF1`, while `0xB1` returns `D4215` —
    the running application's own identifier (§5.2), not a bootloader version;
    `0xA6` already is the bootloader-version read.
-2. **The `0x00` test-mode frame** does not satisfy the documented XOR checksum.
+2. **The `0x00` test-mode frame** — *resolved.* It fails the device's XOR check
+   (`XOR(EA,03,00,1F) = 0xF6`, but the trailer says `0x18`), so the device
+   answers `0xFC` and never dispatches it; and even with a valid checksum,
+   `0x00` is implemented by neither stage and would answer `0xF1`. The command
+   has no effect on either image. See §4.4.
 3. **Where the deobfuscation happens** — *resolved by §6.6.* Flash stores the
    plaintext image: a full readback is byte-identical to `deobfuscate()` of the
    file, checksum field included. The transform is applied by the keyboard

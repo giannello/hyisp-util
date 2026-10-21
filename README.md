@@ -161,6 +161,39 @@ $ hyisp-util flash bare_firmware.bin --convert   # wrap in memory
 
 Run any subcommand with `-h` for its options.
 
+### Read-only diagnostics
+
+`probe` and `regs` never erase, write or lock anything, so they are safe to run
+on a keyboard that is in service:
+
+```console
+$ hyisp-util probe
+$ hyisp-util regs
+device 0x24F0:0140 Das Keyboard (application mode)
+  CONFIG0 (0x00300000) = 0xFFFFFF78
+    CWDTEN=1 (WWDT disabled at power-on)
+    CFOSC=111 (internal 22.1184 MHz (RC))
+    CBODEN=1 (BOD disabled after POR)
+    CBOV=11
+    CBORST=1 (BOD reset disabled)
+    CBS=01 (boot LDROM)
+    DFVSEN=0 (variable size via DFBADR)
+    LOCK=0 (locked (ICP/debug readout blocked))
+    (note: on a DK4 the raw word reads 0xFFFFFF78; the CBS=01 decode means POR enters the LDROM, which then chains to the app -- not a contradiction. Decode is per-TRM.)
+  CONFIG1 (0x00300004) = 0x00008000 (DFBADR=0x8000)
+  GCR PDID  (0x50000000) = 0x00012315 (payload 00 01 23 15)
+  flash base (0x2000013C) = 0x00008000
+```
+
+`regs` reads the chip's user-configuration words and decodes them, which is
+how you see the flash **LOCK** state and the **CBS** boot-origin bits — the two
+things that decide whether the keyboard boots from its bootloader or from its
+application, and whether its flash can be read back over the debug interface.
+This is an **application-mode** command: the bootloader implements none of these
+getters and answers `0xF1` to `0xFB`. Run it against a unit sitting in
+application mode; `--allow-isp` only makes the tool *find* a unit that is
+already in bootloader mode, where the read then fails with a clear error.
+
 ### Typical session
 
 ```console
